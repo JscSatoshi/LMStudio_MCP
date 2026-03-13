@@ -16,16 +16,24 @@
 
 ## 🏗️ Architecture
 
-```
- LM Studio  (your machine)
-     ↕  SSE :3000
- ┌───────────────────────┐
- │  Docker               │
- │                       │
- │   MCP Server (:3000)  │
- │     ├── SearXNG (:8081)  ← web search
- │     └── Chromium         ← page rendering
- └───────────────────────┘
+```mermaid
+flowchart TD
+    LMS["🖥️ LM Studio (your machine)"]
+    LMS <-->|"SSE :3000"| MCP
+
+    subgraph Docker["🐳 Docker"]
+        MCP["⚡ MCP Server :3000"]
+        SearX["🔎 SearXNG :8081"]
+        Chrome["🌐 Chromium headless"]
+        MCP -->|search| SearX
+        MCP -->|browse| Chrome
+    end
+
+    style Docker fill:#1e1e2e,stroke:#89b4fa,color:#cdd6f4
+    style MCP fill:#313244,stroke:#a6e3a1,color:#a6e3a1
+    style SearX fill:#313244,stroke:#f9e2af,color:#f9e2af
+    style Chrome fill:#313244,stroke:#89b4fa,color:#89b4fa
+    style LMS fill:#313244,stroke:#cba6f7,color:#cba6f7
 ```
 
 | Service | Port | Description |
