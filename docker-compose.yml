@@ -1,0 +1,79 @@
+services:
+  searxng:
+    image: searxng/searxng:latest
+    container_name: searxng
+    ports:
+      - "8081:8080"
+    environment:
+      - SEARXNG_SECRET=${SEARXNG_SECRET}
+    volumes:
+      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - |
+          import sys, urllib.request
+          url = 'http://127.0.0.1:8080/'
+          try:
+              with urllib.request.urlopen(url, timeout=5) as response:
+                  sys.exit(0 if response.status < 500 else 1)
+          except Exception:
+              sys.exit(1)
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: always
+    networks:
+      - ai-bridge
+
+  mcp:
+    build:
+      context: ./mcp
+    image: lmstudio-mcp:latest
+    container_name: mcp
+    shm_size: "512m"
+    ports:
+      - "3000:3000"
+    environment:
+      - MCP_TRANSPORT=sse
+      - MCP_HOST=0.0.0.0
+      - MCP_PORT=3000
+      - SEARXNG_URL=http://searxng:8080
+      - SEARXNG_TIMEOUT=15
+      - PAGE_TIMEOUT=15000
+      - FETCH_CONCURRENCY=5
+    working_dir: /app
+    volumes:
+      - ./mcp/server.py:/app/server.py:ro
+    depends_on:
+      searxng:
+        condition: service_healthy
+        restart: true
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - |
+          import sys, urllib.request
+          url = 'http://127.0.0.1:3000/sse'
+          try:
+              with urllib.request.urlopen(url, timeout=5) as response:
+                  sys.exit(0 if response.status < 500 else 1)
+          except Exception:
+              sys.exit(1)
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: always
+    networks:
+      - ai-bridge
+
+
+networks:
+  ai-bridge:
+    driver: bridge
