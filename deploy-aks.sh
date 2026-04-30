@@ -154,12 +154,15 @@ if [[ "$SKIP_INFRA" == false ]]; then
     fi
 
     # AKS Cluster
-    step "Creating AKS cluster: $CLUSTER_NAME (this may take several minutes)"
-    if az aks show --name "$CLUSTER_NAME" --resource-group "$RESOURCE_GROUP" &>/dev/null; then
-        ok "AKS cluster already exists"
+    step "Checking AKS cluster in $RESOURCE_GROUP"
+    EXISTING_CLUSTER=$(az aks list --resource-group "$RESOURCE_GROUP" --query "[0].name" -o tsv 2>/dev/null | tr -d '[:space:]')
+    if [[ -n "$EXISTING_CLUSTER" ]]; then
+        CLUSTER_NAME="$EXISTING_CLUSTER"
+        ok "Found existing AKS cluster: $CLUSTER_NAME"
         az aks update --name "$CLUSTER_NAME" --resource-group "$RESOURCE_GROUP" \
             --attach-acr "$ACR_NAME" --output none 2>/dev/null || true
     else
+        step "Creating AKS cluster: $CLUSTER_NAME (this may take several minutes)"
         az aks create \
             --name "$CLUSTER_NAME" \
             --resource-group "$RESOURCE_GROUP" \
