@@ -150,13 +150,16 @@ Use `deploy-aks.sh` to deploy the full stack to AKS from WSL or Linux:
 
 ```bash
 # Full deployment (creates RG, ACR, AKS, builds image, deploys)
-./deploy-aks.sh
+./deploy-aks.sh --subscription <your-subscription-id>
 
 # Custom parameters
-./deploy-aks.sh --resource-group my-rg --location westus2 --acr-name myacr123
+./deploy-aks.sh --subscription <sub-id> --resource-group my-rg --location westus2 --acr-name myacr123
 
 # Skip infra (only rebuild image & redeploy to existing cluster)
-./deploy-aks.sh --skip-infra
+./deploy-aks.sh --subscription <sub-id> --skip-infra
+
+# Without --subscription flag, the script will prompt for input interactively
+./deploy-aks.sh
 ```
 
 **Prerequisites** (auto-installed if missing during preflight):
@@ -169,10 +172,11 @@ Use `deploy-aks.sh` to deploy the full stack to AKS from WSL or Linux:
 
 **What it does:**
 
-1. Creates Azure Resource Group, ACR, and AKS cluster
-2. Builds MCP image and pushes to ACR
-3. Deploys SearXNG (ClusterIP) + MCP (LoadBalancer) with health probes
-4. Outputs the external MCP SSE endpoint URL
+1. Prompts for Azure Subscription ID (or accepts via `--subscription` flag)
+2. Creates Azure Resource Group, ACR, and AKS cluster
+3. Builds MCP image and pushes to ACR
+4. Deploys SearXNG (ClusterIP) + MCP (LoadBalancer) with health probes
+5. Outputs the external MCP SSE endpoint URL
 
 > 💡 MCP service gets a public LoadBalancer IP. SearXNG stays internal (ClusterIP only).
 

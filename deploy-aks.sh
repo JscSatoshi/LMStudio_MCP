@@ -22,6 +22,7 @@ LOCATION="${LOCATION:-eastasia}"
 CLUSTER_NAME="${CLUSTER_NAME:-aks-mcp-websearch}"
 ACR_NAME="${ACR_NAME:-acrmcpwebsearch}"
 NAMESPACE="${NAMESPACE:-mcp-websearch}"
+SUBSCRIPTION_ID="${SUBSCRIPTION_ID:-}"
 SEARXNG_SECRET="${SEARXNG_SECRET:-}"
 NODE_COUNT="${NODE_COUNT:-1}"
 NODE_VM_SIZE="${NODE_VM_SIZE:-Standard_B2s}"
@@ -37,6 +38,7 @@ while [[ $# -gt 0 ]]; do
         --location)        LOCATION="$2"; shift 2 ;;
         --cluster-name)    CLUSTER_NAME="$2"; shift 2 ;;
         --acr-name)        ACR_NAME="$2"; shift 2 ;;
+        --subscription)    SUBSCRIPTION_ID="$2"; shift 2 ;;
         --namespace)       NAMESPACE="$2"; shift 2 ;;
         --secret)          SEARXNG_SECRET="$2"; shift 2 ;;
         --node-count)      NODE_COUNT="$2"; shift 2 ;;
@@ -100,12 +102,24 @@ if [[ ${#MISSING[@]} -gt 0 ]]; then
 fi
 
 # Azure login check
+if [[ -z "$SUBSCRIPTION_ID" ]]; then
+    echo ""
+    read -rp "   Enter Azure Subscription ID: " SUBSCRIPTION_ID
+    if [[ -z "$SUBSCRIPTION_ID" ]]; then
+        fail "Subscription ID is required."
+        exit 1
+    fi
+fi
+
 if ! az account show &>/dev/null; then
     echo ""
     fail "Not logged in to Azure. Running 'az login'..."
     az login
 fi
 ok "Azure CLI authenticated"
+
+az account set --subscription "$SUBSCRIPTION_ID"
+ok "Subscription set to: $SUBSCRIPTION_ID"
 
 # Generate SearXNG secret if not provided
 if [[ -z "$SEARXNG_SECRET" ]]; then
