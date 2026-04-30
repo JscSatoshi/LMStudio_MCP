@@ -51,7 +51,7 @@ flowchart TD
 | Requirement | Note |
 |:------------|:-----|
 | 🐳 [Docker](https://docs.docker.com/get-docker/) & Docker Compose | Container runtime |
-| 🐍 Python 3.x | For `deploy.py` helper script |
+| 🐍 Python 3.x | For `deploy-local.py` helper script |
 | 🤖 MCP-compatible client | Claude Desktop, Cursor, Continue, LM Studio, etc. |
 
 ---
@@ -63,7 +63,7 @@ flowchart TD
 echo "SEARXNG_SECRET=$(openssl rand -hex 32)" > .env
 
 # 2️⃣ Build & launch
-python3 deploy.py --start
+python3 deploy-local.py --start
 
 # 3️⃣ Connect your MCP client to:
 #    👉 http://localhost:3000/sse
@@ -105,11 +105,11 @@ python3 deploy.py --start
 ## 💻 Commands
 
 ```bash
-python3 deploy.py --start        # 🟢 Start (skips rebuild if image exists)
-python3 deploy.py --rebuild      # 🔄 Force rebuild, then start
-python3 deploy.py --stop         # 🔴 Stop and remove containers
-python3 deploy.py --logs         # 📋 Stream logs
-python3 deploy.py --start --logs # 🟢 Start + stream logs
+python3 deploy-local.py --start        # 🟢 Start (skips rebuild if image exists)
+python3 deploy-local.py --rebuild      # 🔄 Force rebuild, then start
+python3 deploy-local.py --stop         # 🔴 Stop and remove containers
+python3 deploy-local.py --logs         # 📋 Stream logs
+python3 deploy-local.py --start --logs # 🟢 Start + stream logs
 ```
 
 > 💡 `server.py` and `web_core.py` are volume-mounted — `docker restart mcp` applies code changes without rebuilding.
@@ -144,11 +144,46 @@ python3 deploy.py --start --logs # 🟢 Start + stream logs
 
 ---
 
+## ☁️ Deploy to AKS (Azure Kubernetes Service)
+
+Use `deploy-aks.sh` to deploy the full stack to AKS from WSL or Linux:
+
+```bash
+# Full deployment (creates RG, ACR, AKS, builds image, deploys)
+./deploy-aks.sh
+
+# Custom parameters
+./deploy-aks.sh --resource-group my-rg --location westus2 --acr-name myacr123
+
+# Skip infra (only rebuild image & redeploy to existing cluster)
+./deploy-aks.sh --skip-infra
+```
+
+**Prerequisites** (auto-installed if missing during preflight):
+
+| Tool | Install (WSL/Linux) |
+|:-----|:--------------------|
+| `az` | `curl -sL https://aka.ms/InstallAzureCLIDeb \| sudo bash` |
+| `kubectl` | `sudo az aks install-cli` |
+| `docker` | `sudo apt-get install -y docker.io` |
+
+**What it does:**
+
+1. Creates Azure Resource Group, ACR, and AKS cluster
+2. Builds MCP image and pushes to ACR
+3. Deploys SearXNG (ClusterIP) + MCP (LoadBalancer) with health probes
+4. Outputs the external MCP SSE endpoint URL
+
+> 💡 MCP service gets a public LoadBalancer IP. SearXNG stays internal (ClusterIP only).
+
+---
+
 ## 📁 Project Structure
 
 ```
 📦 MCPserver/
-├── 🚀 deploy.py                  # Deployment & lifecycle helper
+├── 🚀 deploy-local.py              # Local Docker deployment helper
+├── ☁️ deploy-aks.sh              # AKS deployment (bash/WSL)
 ├── 🐳 docker-compose.yml         # Container orchestration
 ├── 🤖 mcp-lmstudio-config.json   # LM Studio MCP client config
 ├── 🔒 .env                       # SEARXNG_SECRET (create manually)
