@@ -135,8 +135,14 @@ if [[ "$SKIP_INFRA" == false ]]; then
 
     # Resource Group
     step "Creating Resource Group: $RESOURCE_GROUP"
-    az group create --name "$RESOURCE_GROUP" --location "$LOCATION" --output none
-    ok "Resource Group ready"
+    EXISTING_LOCATION=$(az group show --name "$RESOURCE_GROUP" --query location -o tsv 2>/dev/null || true)
+    if [[ -n "$EXISTING_LOCATION" ]]; then
+        LOCATION="$EXISTING_LOCATION"
+        ok "Resource Group already exists in $LOCATION, using that location"
+    else
+        az group create --name "$RESOURCE_GROUP" --location "$LOCATION" --output none
+        ok "Resource Group created in $LOCATION"
+    fi
 
     # ACR
     step "Creating Azure Container Registry: $ACR_NAME"
