@@ -382,7 +382,7 @@ class WebCore:
         if err := self.validate_url(url):
             raise RuntimeError(f"Blocked URL: {err}")
         ctx = await self._get_screenshot_context()
-        page = await ctx.new_page(viewport={"width": 1280, "height": 720})
+        page = await ctx.new_page()
         try:
             try:
                 await page.goto(url, wait_until="load", timeout=self.config.page_timeout)
