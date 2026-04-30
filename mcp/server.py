@@ -2,7 +2,6 @@
 
 import os
 from contextlib import asynccontextmanager
-from datetime import date
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.utilities.types import Image
@@ -21,12 +20,10 @@ async def _lifespan(app):
 # ---------------------------------------------------------------------------
 # MCP server
 # ---------------------------------------------------------------------------
-_today = date.today().strftime("%Y-%m-%d")
 
 mcp = FastMCP(
     name="web",
     instructions=(
-        f"Today's date: {_today}\n"
         "You have web tools. Pick the RIGHT tool for each request:\n"
         "- search(query)       → DEFAULT tool for web searches. Returns titles, URLs, and snippets fast (~1s). Use this first.\n"
         "- deep_search(query)  → Use when you need full page content, not just snippets. Slower (reads pages with a browser).\n"

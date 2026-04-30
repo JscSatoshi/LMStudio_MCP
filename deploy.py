@@ -172,7 +172,7 @@ def do_pull(dc: list[str]) -> None:
         ok(f"{image} cached locally — skipping pull.")
     else:
         print(f"  {image} not found — pulling...")
-        result = subprocess.run(["docker", "pull", image], check=False)
+        result = compose("pull", "searxng", dc=dc, check=False)
         if result.returncode != 0:
             warn(f"Pull failed for {image}. Docker will retry during 'up'.")
 
@@ -190,7 +190,7 @@ def do_build(dc: list[str], force: bool = False) -> bool:
         "build",
         "mcp",
         dc=dc,
-        env={"DOCKER_BUILDKIT": "0"},
+        env={"DOCKER_BUILDKIT": "1"},
     )
     return True
 
