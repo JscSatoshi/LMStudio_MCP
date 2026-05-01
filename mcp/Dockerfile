@@ -27,6 +27,9 @@ RUN pip install --root-user-action=ignore -r requirements.txt \
         /usr/share/info/* \
         /usr/share/lintian/*
 
+# Copy application source last so dependency layer above stays cached
+COPY server.py web_core.py ./
+
 EXPOSE 3000
 
 CMD ["python", "server.py"]
