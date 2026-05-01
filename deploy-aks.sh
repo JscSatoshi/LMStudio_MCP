@@ -1,15 +1,14 @@
 #!/usr/bin/env bash
 #
-# Deploy MCP Web Search Server to Azure Kubernetes Service (AKS).
+# Deploy MCP Web Search Server to an existing Azure Kubernetes Service (AKS) cluster.
 #
 # Usage:
-#   ./deploy-aks.sh                                          # Full deployment
-#   ./deploy-aks.sh --skip-infra                             # Only rebuild & redeploy
-#   ./deploy-aks.sh --resource-group my-rg --location westus2
+#   ./deploy-aks.sh --subscription <sub-id> --resource-group <rg> --cluster-name <aks>
+#   ./deploy-aks.sh --subscription <sub-id> --resource-group <rg> --cluster-name <aks> --acr-name <acr>
 #
 # Environment overrides (or pass as flags):
-#   RESOURCE_GROUP, LOCATION, CLUSTER_NAME, ACR_NAME,
-#   NAMESPACE, SEARXNG_SECRET, NODE_COUNT, NODE_VM_SIZE
+#   RESOURCE_GROUP, CLUSTER_NAME, ACR_NAME,
+#   NAMESPACE, SEARXNG_SECRET
 
 set -euo pipefail
 
@@ -17,16 +16,12 @@ set -euo pipefail
 # Defaults
 # ─────────────────────────────────────────────────────────────────────────────
 
-RESOURCE_GROUP="${RESOURCE_GROUP:-rg-mcp-websearch}"
-LOCATION="${LOCATION:-eastasia}"
-CLUSTER_NAME="${CLUSTER_NAME:-aks-mcp-websearch}"
+RESOURCE_GROUP="${RESOURCE_GROUP:-}"
+CLUSTER_NAME="${CLUSTER_NAME:-}"
 ACR_NAME="${ACR_NAME:-acrmcpwebsearch}"
 NAMESPACE="${NAMESPACE:-mcp-websearch}"
 SUBSCRIPTION_ID="${SUBSCRIPTION_ID:-}"
 SEARXNG_SECRET="${SEARXNG_SECRET:-}"
-NODE_COUNT="${NODE_COUNT:-1}"
-NODE_VM_SIZE="${NODE_VM_SIZE:-Standard_B2s}"
-SKIP_INFRA=false
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Parse arguments
@@ -35,15 +30,11 @@ SKIP_INFRA=false
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --resource-group)  RESOURCE_GROUP="$2"; shift 2 ;;
-        --location)        LOCATION="$2"; shift 2 ;;
         --cluster-name)    CLUSTER_NAME="$2"; shift 2 ;;
         --acr-name)        ACR_NAME="$2"; shift 2 ;;
         --subscription)    SUBSCRIPTION_ID="$2"; shift 2 ;;
         --namespace)       NAMESPACE="$2"; shift 2 ;;
         --secret)          SEARXNG_SECRET="$2"; shift 2 ;;
-        --node-count)      NODE_COUNT="$2"; shift 2 ;;
-        --node-vm-size)    NODE_VM_SIZE="$2"; shift 2 ;;
-        --skip-infra)      SKIP_INFRA=true; shift ;;
         -h|--help)
             sed -n '2,/^$/p' "$0" | grep '^#' | sed 's/^# \?//'
             exit 0 ;;
@@ -128,58 +119,38 @@ if [[ -z "$SEARXNG_SECRET" ]]; then
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Infrastructure provisioning
+# Validate required parameters
 # ─────────────────────────────────────────────────────────────────────────────
 
-if [[ "$SKIP_INFRA" == false ]]; then
-
-    # Resource Group
-    step "Creating Resource Group: $RESOURCE_GROUP"
-    EXISTING_LOCATION=$(az group show --name "$RESOURCE_GROUP" --query location -o tsv 2>/dev/null || true)
-    if [[ -n "$EXISTING_LOCATION" ]]; then
-        LOCATION="$EXISTING_LOCATION"
-        ok "Resource Group already exists in $LOCATION, using that location"
-    else
-        az group create --name "$RESOURCE_GROUP" --location "$LOCATION" --output none
-        ok "Resource Group created in $LOCATION"
-    fi
-
-    # ACR
-    step "Creating Azure Container Registry: $ACR_NAME"
-    if az acr show --name "$ACR_NAME" --resource-group "$RESOURCE_GROUP" &>/dev/null; then
-        ok "ACR already exists"
-    else
-        az acr create --name "$ACR_NAME" --resource-group "$RESOURCE_GROUP" --sku Basic --output none
-        ok "ACR created"
-    fi
-
-    # AKS Cluster
-    step "Checking AKS cluster in $RESOURCE_GROUP"
-    EXISTING_CLUSTER=$(az aks list --resource-group "$RESOURCE_GROUP" --query "[0].name" -o tsv 2>/dev/null | tr -d '[:space:]')
-    if [[ -n "$EXISTING_CLUSTER" ]]; then
-        CLUSTER_NAME="$EXISTING_CLUSTER"
-        ok "Found existing AKS cluster: $CLUSTER_NAME"
-        az aks update --name "$CLUSTER_NAME" --resource-group "$RESOURCE_GROUP" \
-            --attach-acr "$ACR_NAME" --output none 2>/dev/null || true
-    else
-        step "Creating AKS cluster: $CLUSTER_NAME (this may take several minutes)"
-        az aks create \
-            --name "$CLUSTER_NAME" \
-            --resource-group "$RESOURCE_GROUP" \
-            --location "$LOCATION" \
-            --node-count "$NODE_COUNT" \
-            --node-vm-size "$NODE_VM_SIZE" \
-            --attach-acr "$ACR_NAME" \
-            --generate-ssh-keys \
-            --output none
-        ok "AKS cluster created"
-    fi
-
-    # Get credentials
-    step "Fetching AKS credentials"
-    az aks get-credentials --name "$CLUSTER_NAME" --resource-group "$RESOURCE_GROUP" --overwrite-existing
-    ok "kubectl configured"
+if [[ -z "$RESOURCE_GROUP" ]]; then
+    fail "--resource-group is required."
+    exit 1
 fi
+if [[ -z "$CLUSTER_NAME" ]]; then
+    fail "--cluster-name is required. Specify your existing AKS cluster."
+    exit 1
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Ensure ACR exists and AKS can pull from it
+# ─────────────────────────────────────────────────────────────────────────────
+
+step "Checking Azure Container Registry: $ACR_NAME"
+if az acr show --name "$ACR_NAME" --resource-group "$RESOURCE_GROUP" &>/dev/null; then
+    ok "ACR already exists"
+else
+    az acr create --name "$ACR_NAME" --resource-group "$RESOURCE_GROUP" --sku Basic --output none
+    ok "ACR created"
+fi
+
+# Attach ACR to AKS (idempotent)
+az aks update --name "$CLUSTER_NAME" --resource-group "$RESOURCE_GROUP" \
+    --attach-acr "$ACR_NAME" --output none 2>/dev/null || true
+
+# Fetch kubectl credentials
+step "Fetching AKS credentials"
+az aks get-credentials --name "$CLUSTER_NAME" --resource-group "$RESOURCE_GROUP" --overwrite-existing
+ok "kubectl configured"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Build and push MCP image

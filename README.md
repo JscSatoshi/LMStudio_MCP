@@ -146,21 +146,31 @@ python3 deploy-local.py --start --logs # 🟢 Start + stream logs
 
 ## ☁️ Deploy to AKS (Azure Kubernetes Service)
 
-Use `deploy-aks.sh` to deploy the full stack to AKS from WSL or Linux:
+Use `deploy-aks.sh` to deploy the full stack to an **existing** AKS cluster from WSL or Linux:
 
 ```bash
-# Full deployment (creates RG, ACR, AKS, builds image, deploys)
-./deploy-aks.sh --subscription <your-subscription-id>
+# Deploy to your existing AKS cluster
+./deploy-aks.sh --subscription <sub-id> --resource-group <rg> --cluster-name <aks-name>
 
-# Custom parameters
-./deploy-aks.sh --subscription <sub-id> --resource-group my-rg --location westus2 --acr-name myacr123
-
-# Skip infra (only rebuild image & redeploy to existing cluster)
-./deploy-aks.sh --subscription <sub-id> --skip-infra
-
-# Without --subscription flag, the script will prompt for input interactively
-./deploy-aks.sh
+# With custom ACR name (default: acrmcpwebsearch)
+./deploy-aks.sh --subscription <sub-id> --resource-group <rg> --cluster-name <aks-name> --acr-name myacr123
 ```
+
+**Required flags:**
+
+| Flag | Description |
+|:-----|:------------|
+| `--subscription` | Azure Subscription ID (prompted if omitted) |
+| `--resource-group` | Resource Group containing your AKS cluster |
+| `--cluster-name` | Name of your existing AKS cluster |
+
+**Optional flags:**
+
+| Flag | Default | Description |
+|:-----|:-------:|:------------|
+| `--acr-name` | `acrmcpwebsearch` | Azure Container Registry name (created if missing) |
+| `--namespace` | `mcp-websearch` | Kubernetes namespace |
+| `--secret` | *(auto-generated)* | SearXNG secret key |
 
 **Prerequisites** (auto-installed if missing during preflight):
 
@@ -172,8 +182,8 @@ Use `deploy-aks.sh` to deploy the full stack to AKS from WSL or Linux:
 
 **What it does:**
 
-1. Prompts for Azure Subscription ID (or accepts via `--subscription` flag)
-2. Creates Azure Resource Group, ACR, and AKS cluster
+1. Validates that `--resource-group` and `--cluster-name` are provided
+2. Creates ACR if it doesn't exist, attaches it to the AKS cluster
 3. Builds MCP image and pushes to ACR
 4. Deploys SearXNG (ClusterIP) + MCP (LoadBalancer) with health probes
 5. Outputs the external MCP SSE endpoint URL
