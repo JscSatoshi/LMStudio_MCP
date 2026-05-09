@@ -38,7 +38,7 @@ services:
     ports:
       - "127.0.0.1:3000:3000"
     environment:
-      - MCP_TRANSPORT=sse
+      - MCP_TRANSPORT=streamable-http
       - MCP_HOST=0.0.0.0
       - MCP_PORT=3000
       - SEARXNG_URL=http://searxng:8080
@@ -60,10 +60,16 @@ services:
         - -c
         - |
           import sys, urllib.request
-          url = 'http://127.0.0.1:3000/sse'
+          # streamable-http: GET /mcp without a session returns 4xx (not 5xx), which is healthy.
+          req = urllib.request.Request(
+              'http://127.0.0.1:3000/mcp',
+              headers={'Accept': 'application/json, text/event-stream'},
+          )
           try:
-              with urllib.request.urlopen(url, timeout=5) as response:
+              with urllib.request.urlopen(req, timeout=5) as response:
                   sys.exit(0 if response.status < 500 else 1)
+          except urllib.error.HTTPError as e:
+              sys.exit(0 if e.code < 500 else 1)
           except Exception:
               sys.exit(1)
       interval: 15s

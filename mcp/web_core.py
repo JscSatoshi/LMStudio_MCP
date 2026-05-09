@@ -227,35 +227,19 @@ class WebCore:
         max_results: int = 10,
     ) -> dict[str, Any]:
         max_results = max(1, min(max_results, 20))
-        if language == "auto":
-            language = self._detect_lang(query)
-        params: dict[str, Any] = {
-            "q": query,
-            "categories": categories,
-            "language": language,
-            "safesearch": safe_search,
-        }
-        if time_range in self._VALID_TIME_RANGES and time_range:
-            params["time_range"] = time_range
-        data = await self._searxng_query_with_retry(params, category=categories)
-        results = self._dedup(data.get("results", []))
-        results.sort(key=lambda r: r.get("score", 0), reverse=True)
-        results = results[:max_results]
+        data, results = await self._search_results(
+            query=query,
+            categories=categories,
+            language=language,
+            safe_search=safe_search,
+            time_range=time_range,
+            max_results=max_results,
+        )
         unresponsive = data.get("unresponsive_engines", [])
         payload: dict[str, Any] = {
             "query": query,
             "total": data.get("number_of_results", len(results)),
-            "results": [
-                {
-                    "title": r.get("title", ""),
-                    "url": r.get("url", ""),
-                    "content": r.get("content", "")[:500],
-                    "published": r.get("publishedDate", "") or r.get("published_date", ""),
-                    "engines": r.get("engines", []),
-                    "score": r.get("score", 0),
-                }
-                for r in results
-            ],
+            "results": self._serialize_search_results(results),
         }
         if unresponsive and not results:
             payload["unresponsive_engines"] = [[e[0], e[1]] for e in unresponsive]
@@ -271,22 +255,14 @@ class WebCore:
         max_results: int = 5,
     ) -> dict[str, Any]:
         max_results = max(1, min(max_results, 10))
-        if language == "auto":
-            language = self._detect_lang(query)
-
-        params: dict[str, Any] = {
-            "q": query,
-            "categories": categories,
-            "language": language,
-            "safesearch": safe_search,
-        }
-        if time_range in self._VALID_TIME_RANGES and time_range:
-            params["time_range"] = time_range
-        data = await self._searxng_query_with_retry(params, category=categories)
-
-        results = self._dedup(data.get("results", []))
-        results.sort(key=lambda r: r.get("score", 0), reverse=True)
-        results = results[:max_results]
+        _, results = await self._search_results(
+            query=query,
+            categories=categories,
+            language=language,
+            safe_search=safe_search,
+            time_range=time_range,
+            max_results=max_results,
+        )
         if not results:
             return {"query": query, "pages": []}
 
@@ -295,11 +271,13 @@ class WebCore:
         async def fetch_one(r: dict[str, Any]) -> dict[str, str]:
             url = r.get("url", "")
             title = r.get("title", url)
-            if err := self.validate_url(url):
-                return {"title": title, "url": url, "content": f"[blocked url: {err}]"}
             async with semaphore:
-                text = await self._page_text(url, 8000)
-            return {"title": title, "url": url, "content": text}
+                page_result = await self._page_text(url, 8000)
+            if "error" in page_result:
+                if page_result.get("error_kind") == "blocked":
+                    return {"title": title, "url": url, "content": f"[blocked url: {page_result['error']}]"}
+                return {"title": title, "url": url, "content": f"[fetch error: {page_result['error']}]"}
+            return {"title": title, "url": url, "content": page_result["content"]}
 
         pages = await asyncio.wait_for(
             asyncio.gather(*[fetch_one(r) for r in results]),
@@ -308,24 +286,17 @@ class WebCore:
         return {"query": query, "pages": list(pages)}
 
     async def navigate(self, url: str, wait_until: str = "domcontentloaded", format: str = "text") -> dict[str, str]:
-        if err := self.validate_url(url):
-            return {"url": url, "error": err}
-
         if format == "html":
-            async with self._page_pool.acquire() as page:
-                try:
-                    await page.goto(url, wait_until=wait_until, timeout=self.config.page_timeout)
-                    html = await page.content()
-                    if len(html) > 50000:
-                        html = html[:50000] + "\n<!-- truncated at 50000 chars -->"
-                    return {"url": url, "content": html, "format": "html"}
-                except Exception as exc:
-                    return {"url": url, "error": str(exc)}
+            return await self._with_page_content(
+                url=url,
+                wait_until=wait_until,
+                action=self._read_html_content,
+            )
 
-        text = await self._page_text(url, 20000, wait_until)
-        if text.startswith("[fetch error:") and text.endswith("]"):
-            return {"url": url, "error": text[len("[fetch error: "):-1]}
-        return {"url": url, "content": text, "format": "text"}
+        result = await self._page_text(url, 20000, wait_until)
+        if "error" in result:
+            return {"url": url, "error": result["error"]}
+        return {"url": url, "content": result["content"], "format": "text"}
 
     async def extract_text(
         self,
@@ -333,65 +304,33 @@ class WebCore:
         selector: str = "body",
         wait_until: str = "domcontentloaded",
     ) -> dict[str, Any]:
-        if err := self.validate_url(url):
-            return {"url": url, "error": err}
-        async with self._page_pool.acquire() as page:
-            try:
-                await page.goto(url, wait_until=wait_until, timeout=self.config.page_timeout)
-                element = page.locator(selector).first
-                text = await element.inner_text(timeout=5000)
-                lines = [line.strip() for line in text.splitlines() if line.strip()]
-                content = "\n".join(lines)
-                if len(content) > 20000:
-                    content = content[:20000] + "\n\n[... truncated at 20000 chars]"
-                return {"url": url, "selector": selector, "content": content}
-            except Exception as exc:
-                return {"url": url, "selector": selector, "error": str(exc)}
+        return await self._with_page_content(
+            url=url,
+            wait_until=wait_until,
+            action=lambda page: self._extract_selector_text(page, selector),
+            error_fields={"selector": selector},
+        )
 
     async def extract_links(self, url: str, wait_until: str = "domcontentloaded") -> dict[str, Any]:
-        if err := self.validate_url(url):
-            return {"url": url, "error": err}
-        async with self._page_pool.acquire() as page:
-            try:
-                await page.goto(url, wait_until=wait_until, timeout=self.config.page_timeout)
-                links = await page.eval_on_selector_all(
-                    "a[href]",
-                    "els => els.map(e => ({ text: e.innerText.trim(), href: e.href }))"
-                    ".filter(l => l.href && !l.href.startsWith('javascript:'))",
-                )
-                return {"url": url, "count": len(links), "links": links[:200]}
-            except Exception as exc:
-                return {"url": url, "error": str(exc)}
+        return await self._with_page_content(
+            url=url,
+            wait_until=wait_until,
+            action=self._extract_page_links,
+        )
 
     async def headlines(self, url: str, wait_until: str = "domcontentloaded") -> dict[str, Any]:
-        if err := self.validate_url(url):
-            return {"url": url, "error": err}
-        async with self._page_pool.acquire() as page:
-            try:
-                await page.goto(url, wait_until=wait_until, timeout=self.config.page_timeout)
-                items = await page.eval_on_selector_all(
-                    "h1, h2, h3, h4, h5, h6",
-                    "els => els.map(e => ({ level: parseInt(e.tagName[1]), text: e.innerText.trim() }))"
-                    ".filter(h => h.text.length > 0)",
-                )
-                return {"url": url, "count": len(items), "headlines": items[:200]}
-            except Exception as exc:
-                return {"url": url, "error": str(exc)}
+        return await self._with_page_content(
+            url=url,
+            wait_until=wait_until,
+            action=self._extract_page_headlines,
+        )
 
     async def screenshot(self, url: str, full_page: bool = False) -> bytes:
-        if err := self.validate_url(url):
-            raise RuntimeError(f"Blocked URL: {err}")
+        self._require_allowed_url(url)
         ctx = await self._get_screenshot_context()
         page = await ctx.new_page()
         try:
-            try:
-                await page.goto(url, wait_until="load", timeout=self.config.page_timeout)
-            except Exception:
-                await page.goto(url, wait_until="domcontentloaded", timeout=self.config.page_timeout)
-            try:
-                await page.wait_for_load_state("networkidle", timeout=2000)
-            except Exception:
-                await page.wait_for_timeout(300)
+            await self._goto_screenshot_page(page, url)
             return await page.screenshot(full_page=full_page)
         finally:
             await page.close()
@@ -610,21 +549,162 @@ class WebCore:
         return data
 
     # -----------------------------------------------------------------------
+    # Search helpers
+    # -----------------------------------------------------------------------
+
+    async def _search_results(
+        self,
+        query: str,
+        categories: str,
+        language: str,
+        safe_search: int,
+        time_range: str,
+        max_results: int,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        params = self._build_search_params(
+            query=query,
+            categories=categories,
+            language=language,
+            safe_search=safe_search,
+            time_range=time_range,
+        )
+        data = await self._searxng_query_with_retry(params, category=categories)
+        results = self._rank_search_results(data.get("results", []), max_results=max_results)
+        return data, results
+
+    def _build_search_params(
+        self,
+        query: str,
+        categories: str,
+        language: str,
+        safe_search: int,
+        time_range: str,
+    ) -> dict[str, Any]:
+        resolved_language = self._detect_lang(query) if language == "auto" else language
+        params: dict[str, Any] = {
+            "q": query,
+            "categories": categories,
+            "language": resolved_language,
+            "safesearch": safe_search,
+        }
+        if time_range in self._VALID_TIME_RANGES and time_range:
+            params["time_range"] = time_range
+        return params
+
+    def _rank_search_results(self, results: list[dict[str, Any]], max_results: int) -> list[dict[str, Any]]:
+        ranked = self._dedup(results)
+        ranked.sort(key=lambda item: item.get("score", 0), reverse=True)
+        return ranked[:max_results]
+
+    def _serialize_search_results(self, results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            {
+                "title": item.get("title", ""),
+                "url": item.get("url", ""),
+                "content": item.get("content", "")[:500],
+                "published": item.get("publishedDate", "") or item.get("published_date", ""),
+                "engines": item.get("engines", []),
+                "score": item.get("score", 0),
+            }
+            for item in results
+        ]
+
+    # -----------------------------------------------------------------------
+    # Page helpers
+    # -----------------------------------------------------------------------
+
+    async def _with_page_content(
+        self,
+        url: str,
+        wait_until: str,
+        action,
+        error_fields: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
+        if err := self.validate_url(url):
+            return self._url_error_response(url, err, error_fields=error_fields)
+
+        async with self._page_pool.acquire() as page:
+            try:
+                await self._goto_page(page, url, wait_until)
+                return {"url": url, **(error_fields or {}), **(await action(page))}
+            except Exception as exc:
+                return self._url_error_response(url, str(exc), error_fields=error_fields)
+
+    async def _goto_page(self, page: Page, url: str, wait_until: str) -> None:
+        await page.goto(url, wait_until=wait_until, timeout=self.config.page_timeout)
+
+    async def _goto_screenshot_page(self, page: Page, url: str) -> None:
+        try:
+            await self._goto_page(page, url, "load")
+        except Exception:
+            await self._goto_page(page, url, "domcontentloaded")
+
+        try:
+            await page.wait_for_load_state("networkidle", timeout=2000)
+        except Exception:
+            await page.wait_for_timeout(300)
+
+    async def _read_html_content(self, page: Page) -> dict[str, str]:
+        html = await page.content()
+        if len(html) > 50000:
+            html = html[:50000] + "\n<!-- truncated at 50000 chars -->"
+        return {"content": html, "format": "html"}
+
+    async def _extract_selector_text(self, page: Page, selector: str) -> dict[str, str]:
+        element = page.locator(selector).first
+        text = await element.inner_text(timeout=5000)
+        return {"content": self._normalize_text_content(text, limit=20000)}
+
+    async def _extract_page_links(self, page: Page) -> dict[str, Any]:
+        links = await page.eval_on_selector_all(
+            "a[href]",
+            "els => els.map(e => ({ text: e.innerText.trim(), href: e.href }))"
+            ".filter(l => l.href && !l.href.startsWith('javascript:'))",
+        )
+        return {"count": len(links), "links": links[:200]}
+
+    async def _extract_page_headlines(self, page: Page) -> dict[str, Any]:
+        items = await page.eval_on_selector_all(
+            "h1, h2, h3, h4, h5, h6",
+            "els => els.map(e => ({ level: parseInt(e.tagName[1]), text: e.innerText.trim() }))"
+            ".filter(h => h.text.length > 0)",
+        )
+        return {"count": len(items), "headlines": items[:200]}
+
+    def _normalize_text_content(self, text: str, limit: int) -> str:
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        content = "\n".join(lines)
+        if len(content) > limit:
+            content = content[:limit] + f"\n\n[... truncated at {limit} chars]"
+        return content
+
+    def _url_error_response(
+        self,
+        url: str,
+        error: str,
+        error_fields: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
+        return {"url": url, **(error_fields or {}), "error": error}
+
+    def _require_allowed_url(self, url: str) -> None:
+        if err := self.validate_url(url):
+            raise RuntimeError(f"Blocked URL: {err}")
+
+    # -----------------------------------------------------------------------
     # Page text extraction (uses pool)
     # -----------------------------------------------------------------------
 
-    async def _page_text(self, url: str, limit: int, wait_until: str = "domcontentloaded") -> str:
-        try:
-            async with self._page_pool.acquire() as page:
-                await page.goto(url, wait_until=wait_until, timeout=self.config.page_timeout)
+    async def _page_text(self, url: str, limit: int, wait_until: str = "domcontentloaded") -> dict[str, str]:
+        if err := self.validate_url(url):
+            return {"error": err, "error_kind": "blocked"}
+
+        async with self._page_pool.acquire() as page:
+            try:
+                await self._goto_page(page, url, wait_until)
                 text = await page.inner_text("body")
-                lines = [line.strip() for line in text.splitlines() if line.strip()]
-                content = "\n".join(lines)
-                if len(content) > limit:
-                    content = content[:limit] + f"\n\n[... truncated at {limit} chars]"
-                return content
-        except Exception as exc:
-            return f"[fetch error: {exc}]"
+                return {"content": self._normalize_text_content(text, limit=limit)}
+            except Exception as exc:
+                return {"error": str(exc), "error_kind": "fetch"}
 
     # -----------------------------------------------------------------------
     # Utilities
@@ -656,25 +736,38 @@ class WebCore:
     def _detect_lang(self, text: str) -> str:
         cjk = 0
         latin = 0
+        has_kana = False
+        has_hangul = False
         for ch in text:
             cp = ord(ch)
             if (0x4E00 <= cp <= 0x9FFF) or (0x3400 <= cp <= 0x4DBF) or (0x20000 <= cp <= 0x2A6DF):
                 cjk += 1
             elif 0x3040 <= cp <= 0x30FF:
                 cjk += 1
+                has_kana = True
             elif (0xAC00 <= cp <= 0xD7AF) or (0x1100 <= cp <= 0x11FF):
                 cjk += 1
+                has_hangul = True
             elif ch.isalpha() and cp < 0x300:
                 latin += 1
 
         if cjk == 0:
             return "en"
         if latin == 0:
-            for ch in text:
-                cp = ord(ch)
-                if 0x3040 <= cp <= 0x30FF:
-                    return "ja"
-                if (0xAC00 <= cp <= 0xD7AF) or (0x1100 <= cp <= 0x11FF):
-                    return "ko"
+            if has_kana:
+                return "ja"
+            if has_hangul:
+                return "ko"
             return "zh"
+
+        # Mixed-script queries are common (e.g. "Dogecoin 最新消息").
+        # Prefer CJK language when CJK is dominant to avoid drifting to English-only results.
+        if cjk >= latin:
+            if has_kana:
+                return "ja"
+            if has_hangul:
+                return "ko"
+            return "zh"
+        if latin >= cjk * 3:
+            return "en"
         return "all"

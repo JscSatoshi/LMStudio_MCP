@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-deploy.py — Launch SearXNG + MCP Server via Docker Compose.
+deploy-local.py — Launch SearXNG + MCP Server via Docker Compose.
 """
 
 import argparse
-import os
 import select
 import shutil
 import subprocess
@@ -69,17 +68,6 @@ def compose(*args: str, dc: list[str], check: bool = True) -> subprocess.Complet
     return subprocess.run(
         dc + ["-f", str(COMPOSE_FILE)] + list(args),
         check=check,
-    )
-
-
-def compose_with_env(*args: str, dc: list[str], env: dict[str, str], check: bool = True) -> subprocess.CompletedProcess:
-    """Run docker compose with environment overrides."""
-    merged_env = dict(os.environ)
-    merged_env.update(env)
-    return subprocess.run(
-        dc + ["-f", str(COMPOSE_FILE)] + list(args),
-        check=check,
-        env=merged_env,
     )
 
 
@@ -186,31 +174,8 @@ def do_build(dc: list[str], force: bool = False) -> bool:
         ok(f"{MCP_IMAGE} already exists — skipping build.  (use --rebuild to force)")
         return False
     print("  building MCP service images...")
-    compose_with_env(
-        "build",
-        "mcp",
-        dc=dc,
-        env={"DOCKER_BUILDKIT": "1"},
-    )
+    compose("build", "mcp", dc=dc)
     return True
-
-
-# Base images only needed at build time — safe to remove after build
-_BASE_IMAGES = ("python:3.12-slim",)
-
-
-def _cleanup_base_images() -> None:
-    """Remove base images that are no longer needed after build."""
-    for image in _BASE_IMAGES:
-        if image_exists(image):
-            result = subprocess.run(
-                ["docker", "rmi", image],
-                capture_output=True,
-            )
-            if result.returncode == 0:
-                ok(f"Removed base image {image} to save disk space.")
-            else:
-                warn(f"Could not remove {image} (may still be in use).")
 
 
 def do_launch(dc: list[str], detach: bool) -> None:
@@ -260,8 +225,8 @@ def do_summary(searxng_up: bool, mcp_up: bool) -> None:
     print(f"  {m_icon}  MCP (SSE)   http://localhost:{MCP_PORT}/sse")
     print(f"\n  {_c('cyan', 'docker logs -f searxng')}    SearXNG logs")
     print(f"  {_c('cyan', 'docker logs -f mcp')}          MCP logs")
-    print(f"  {_c('cyan', 'python3 deploy.py --stop')}    stop all")
-    print(f"  {_c('cyan', 'python3 deploy.py --start')}   start again")
+    print(f"  {_c('cyan', 'python3 deploy-local.py --stop')}    stop all")
+    print(f"  {_c('cyan', 'python3 deploy-local.py --start')}   start again")
     print(f"{bar}\n")
 
 # ---------------------------------------------------------------------------
@@ -313,9 +278,9 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
-            "  python3 deploy.py --start      start containers in background\n"
-            "  python3 deploy.py --stop       stop all containers\n"
-            "  python3 deploy.py --logs       stream logs after startup\n"
+            "  python3 deploy-local.py --start      start containers in background\n"
+            "  python3 deploy-local.py --stop       stop all containers\n"
+            "  python3 deploy-local.py --logs       stream logs after startup\n"
         ),
     )
     parser.add_argument("--start",   action="store_true", help="Start containers in background")
@@ -355,9 +320,7 @@ def main() -> None:
     do_pull(dc)
 
     step(3, 4, "Building MCP images")
-    built = do_build(dc, force=args.rebuild)
-    if built:
-        _cleanup_base_images()
+    do_build(dc, force=args.rebuild)
 
     step(4, 4, "Launching containers")
     do_launch(dc, detach=True)

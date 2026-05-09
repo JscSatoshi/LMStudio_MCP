@@ -24,19 +24,30 @@ async def _lifespan(app):
 mcp = FastMCP(
     name="web",
     instructions=(
-        "You have web tools. Pick the RIGHT tool for each request:\n"
-        "- search(query)       → DEFAULT tool for web searches. Returns titles, URLs, and snippets fast (~1s). Use this first.\n"
-        "- deep_search(query)  → Use when you need full page content, not just snippets. Slower (reads pages with a browser).\n"
-        "- screenshot(url)     → user wants to SEE a page, capture a visual, or get an image of a website\n"
-        "- navigate(url)       → user wants the text content of a specific URL (set format='html' for raw HTML source)\n"
-        "- extract_links(url)  → user wants all hyperlinks from a page\n"
-        "- extract_text(url, selector) → user wants text from a specific part of a page\n\n"
-        "TIPS for better results:\n"
-        "- For RECENT or CURRENT topics (news, prices, events, releases), ALWAYS set time_range='week' or 'month'\n"
-        "- Use categories='news' for current events, 'it' for programming, 'science' for academic\n"
-        "- Set language explicitly (e.g. 'zh', 'ja') if the user's query language differs from the desired result language\n\n"
-        "IMPORTANT: When the user says 'screenshot', 'capture', 'show me', or 'what does X look like', "
-        "ALWAYS use the screenshot tool — do NOT use search."
+        "You have web tools. Follow this IF-THEN routing strictly:\n"
+        "1) IF user asks for a visual (screenshot/capture/show me/look like), THEN call screenshot(url).\n"
+        "2) IF user gives a specific URL and wants page content, THEN call read_page(url, mode='full').\n"
+        "3) IF user gives a specific URL and wants structure, THEN call read_page with mode='links' or mode='headlines'.\n"
+        "4) IF user asks for text from part of a page, THEN call read_page(url, mode='text', selector='...').\n"
+        "5) IF user asks a web question without a URL, THEN call search(query) first.\n"
+        "6) IF search snippets are insufficient for final answer, THEN escalate once to deep_search(query).\n"
+        "7) IF deep_search still lacks a key fact, THEN call read_page(url, mode='full') on one best candidate URL.\n\n"
+        "TOOLS:\n"
+        "- search(query, categories, language, time_range): fast snippets for discovery.\n"
+        "- deep_search(query,...): slower full-page reading for multi-source synthesis.\n"
+        "- read_page(url, mode, selector): unified single-page reader.\n"
+        "- navigate(url, format): direct text/html fetch when explicit raw HTML is required.\n"
+        "- screenshot(url): visual output.\n\n"
+        "QUERY TUNING:\n"
+        "- Recent topics (news, prices, releases): time_range='week' or 'month'.\n"
+        "- Use categories='news' for current events, 'it' for programming, 'science' for academic.\n"
+        "- Keep language='auto' unless user explicitly needs another language.\n\n"
+        "CALL BUDGET RULES:\n"
+        "- Prefer one good call over many shallow calls.\n"
+        "- Never repeat identical failed/empty calls; change at least one parameter.\n"
+        "- If search returns 0: broaden query -> time_range='' -> categories='general' -> language='all'.\n"
+        "- On tool error (prefix ERROR:), adjust inputs instead of blind retry.\n"
+        "- Stop calling tools once evidence is sufficient to answer."
     ),
     lifespan=_lifespan,
 )
@@ -77,21 +88,37 @@ async def search(
         results = data.get("results", [])
     except Exception as exc:
         err = f"{type(exc).__name__}: {exc}".rstrip(": ")
-        return f"Search failed: {err}"
+        return f"ERROR: search failed: {err}"
 
     if not results:
-        return "No search results found."
+        unresponsive = data.get("unresponsive_engines", [])
+        hint_lines = ["No search results found."]
+        if unresponsive:
+            engines = ", ".join(e[0] for e in unresponsive[:5])
+            hint_lines.append(f"Unresponsive engines: {engines}")
+        hint_lines.append(
+            "Hint: try a broader query, time_range='', or language='all'. "
+            "Do not retry with identical arguments."
+        )
+        return "\n".join(hint_lines)
 
     lines = [f"=== Search: '{query}' — {len(results)} results ===\n"]
     for i, r in enumerate(results, 1):
-        title   = r.get("title", "").strip()
-        url     = r.get("url", "")
-        snippet = r.get("content", "").strip()
+        title     = r.get("title", "").strip()
+        url       = r.get("url", "")
+        snippet   = r.get("content", "").strip()
+        published = r.get("published", "")
         lines.append(f"[{i}] {title}")
         lines.append(f"    {url}")
+        if published:
+            lines.append(f"    published: {published}")
         if snippet:
             lines.append(f"    {snippet[:300]}")
         lines.append("")
+    lines.append(
+        "Hint: if snippets are not enough to answer, call deep_search with the same query "
+        "or navigate(url) on a top result. Do not call search again with the same arguments."
+    )
     return "\n".join(lines)
 
 
@@ -131,11 +158,18 @@ async def deep_search(
         pages = data.get("pages", [])
     except Exception as exc:
         err = f"{type(exc).__name__}: {exc}".rstrip(": ")
-        return f"Search failed: {err}"
+        return f"ERROR: deep_search failed: {err}"
 
     if not pages:
-        return "No search results found."
+        return (
+            "No search results found.\n"
+            "Hint: try a broader query, time_range='', or language='all'. "
+            "Do not retry with identical arguments."
+        )
 
+    failed = sum(
+        1 for p in pages if p.get("content", "").startswith(("[fetch error:", "[blocked url:"))
+    )
     lines = [f"=== Deep Search: '{query}' - reading {len(pages)} pages ===", ""]
     for i, page in enumerate(pages, 1):
         lines.append(f"--- [{i}] {page.get('title', '')}")
@@ -143,6 +177,11 @@ async def deep_search(
         lines.append("")
         lines.append(page.get("content", ""))
         lines.append("")
+    if failed:
+        lines.append(
+            f"Hint: {failed}/{len(pages)} pages failed to load. "
+            "Try navigate(url) on a specific URL or rerun with a different query."
+        )
     return "\n".join(lines)
 
 
@@ -165,7 +204,7 @@ async def navigate(
     """
     result = await core.navigate(url=url, format=format, wait_until=wait_until)
     if "error" in result:
-        return result["error"]
+        return f"ERROR: navigate({url}): {result['error']}"
     return result.get("content", "")
 
 
@@ -182,67 +221,74 @@ async def screenshot(url: str, full_page: bool = False) -> Image:
         buf = await core.screenshot(url=url, full_page=full_page)
         return Image(data=buf, format="png")
     except Exception as exc:
-        raise RuntimeError(f"Failed to screenshot {url}: {exc}") from exc
+        raise RuntimeError(f"ERROR: screenshot({url}): {exc}") from exc
 
 
 @mcp.tool()
-async def extract_links(url: str, wait_until: str = "domcontentloaded") -> str:
-    """
-    Extract all hyperlinks from a web page.
-
-    Args:
-        url:        The URL to extract links from.
-        wait_until: 'load', 'domcontentloaded', or 'networkidle'.
-    """
-    result = await core.extract_links(url=url, wait_until=wait_until)
-    if "error" in result:
-        return result["error"]
-    links = result.get("links", [])
-    if not links:
-        return "No links found on this page."
-    lines = []
-    for link in links[:200]:
-        text = link.get("text", "").replace("\n", " ").strip()
-        href = link.get("href", "")
-        lines.append(f"- [{text}]({href})" if text else f"- {href}")
-    return f"Found {len(links)} links (showing {len(lines)}):\n" + "\n".join(lines)
-
-
-@mcp.tool()
-async def extract_text(
+async def read_page(
     url: str,
+    mode: str = "text",
     selector: str = "body",
     wait_until: str = "domcontentloaded",
 ) -> str:
     """
-    Extract text from a specific CSS selector on a page.
+    Unified page reader for small-model routing.
 
     Args:
-        url:        The URL to extract text from.
-        selector:   CSS selector (e.g. 'article', 'main', '#content').
+        url:        The URL to read.
+        mode:       One of: 'links', 'text', 'headlines', 'full'.
+        selector:   CSS selector for mode='text'.
         wait_until: 'load', 'domcontentloaded', or 'networkidle'.
     """
-    result = await core.extract_text(url=url, selector=selector, wait_until=wait_until)
-    if "error" in result:
-        return result["error"]
-    return result.get("content", "")
+    mode = (mode or "text").strip().lower()
 
+    if mode == "links":
+        result = await core.extract_links(url=url, wait_until=wait_until)
+        if "error" in result:
+            return f"ERROR: read_page({url}, mode='links'): {result['error']}"
+        links = result.get("links", [])
+        if not links:
+            return "No links found on this page."
+        lines = []
+        for link in links[:200]:
+            text = link.get("text", "").replace("\n", " ").strip()
+            href = link.get("href", "")
+            lines.append(f"- [{text}]({href})" if text else f"- {href}")
+        truncated = len(links) > len(lines)
+        header = f"Found {len(links)} links (showing {len(lines)}{', truncated' if truncated else ''}):"
+        return header + "\n" + "\n".join(lines)
 
-@mcp.tool()
-async def headlines(url: str, wait_until: str = "domcontentloaded") -> str:
-    """Extract all headings (h1-h6) from a web page."""
-    result = await core.headlines(url=url, wait_until=wait_until)
-    if "error" in result:
-        return f"Failed to extract headlines from {url}: {result['error']}"
+    if mode == "headlines":
+        result = await core.headlines(url=url, wait_until=wait_until)
+        if "error" in result:
+            return f"ERROR: read_page({url}, mode='headlines'): {result['error']}"
+        items = result.get("headlines", [])
+        if not items:
+            return "No headlines found on this page."
+        lines = [f"Found {result.get('count', len(items))} headlines (showing {len(items)}):", ""]
+        for item in items:
+            lines.append(f"- h{item.get('level', '?')}: {item.get('text', '')}")
+        return "\n".join(lines)
 
-    items = result.get("headlines", [])
-    if not items:
-        return "No headlines found on this page."
+    if mode == "full":
+        result = await core.navigate(url=url, format="text", wait_until=wait_until)
+        if "error" in result:
+            return f"ERROR: read_page({url}, mode='full'): {result['error']}"
+        return result.get("content", "")
 
-    lines = [f"Found {result.get('count', len(items))} headlines (showing {len(items)}):", ""]
-    for item in items:
-        lines.append(f"- h{item.get('level', '?')}: {item.get('text', '')}")
-    return "\n".join(lines)
+    if mode == "text":
+        result = await core.extract_text(url=url, selector=selector, wait_until=wait_until)
+        if "error" in result:
+            return (
+                f"ERROR: read_page({url}, mode='text', selector={selector!r}): "
+                f"{result['error']}"
+            )
+        return result.get("content", "")
+
+    return (
+        "ERROR: read_page invalid mode. "
+        "Use one of: links, text, headlines, full."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -250,7 +296,7 @@ async def headlines(url: str, wait_until: str = "domcontentloaded") -> str:
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     transport = os.environ.get("MCP_TRANSPORT", "stdio")
-    if transport == "sse":
+    if transport in ("sse", "streamable-http"):
         mcp.settings.host = os.environ.get("MCP_HOST", "0.0.0.0")
         mcp.settings.port = int(os.environ.get("MCP_PORT", "3000"))
     mcp.run(transport=transport)
